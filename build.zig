@@ -1,10 +1,18 @@
 const std = @import("std");
 
 const Scanner = @import("zig-wayland").Scanner;
+const ziggen = @import("zigglgen");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    const gl_bindings = ziggen.generateBindingsModule(b, .{
+        .api = .gl,
+        .version = .@"4.5",
+        .profile = .core,
+        .extensions = &.{ .ARB_clip_control, .NV_scissor_exclusive },
+    });
 
     const scanner = Scanner.create(b, .{});
 
@@ -30,11 +38,15 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "waive2",
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/main_opengl.zig"),
         .target = target,
         .optimize = optimize,
     });
 
+    exe.linkSystemLibrary("wayland-egl");
+    exe.linkSystemLibrary("EGL");
+
+    exe.root_module.addImport("gl", gl_bindings);
     exe.root_module.addImport("wayland", wayland);
     exe.linkLibC();
     exe.linkSystemLibrary("wayland-client");

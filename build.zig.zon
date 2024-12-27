@@ -6,6 +6,10 @@
             .url = "https://github.com/ifreund/zig-wayland/archive/2500fc313608be05370ebb67426a05604f2fd937.tar.gz",
             .hash = "12200e8929e6f520bab7c6229a5d550f818bd6109077d2b99dee4aa79aa6f4835344",
         },
+        .zigglgen = .{
+            .url = "https://github.com/castholm/zigglgen/archive/701f41808086411f14d3bc2d87fc0b14bd09ceba.tar.gz",
+            .hash = "1220acff2285b51630055c7c062fb62a01b32272297b27e90cd6f85901c1b4d1c48d",
+        },
     },
 
     .paths = .{

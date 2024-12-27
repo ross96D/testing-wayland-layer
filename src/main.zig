@@ -185,7 +185,6 @@ pub fn frame_listener(_: *wl.Callback, event: wl.Callback.Event, context: *Conte
 const palette = [_]u32{ 0xff1a1c2c, 0xff5d275d, 0xffb13e53, 0xffef7d57, 0xffffcd75, 0xffa7f070, 0xff38b764, 0xff257179, 0xff29366f, 0xff3b5dc9, 0xff41a6f6, 0xff73eff7, 0xfff4f4f4, 0xff94b0c2, 0xff566c86, 0xff333c57 };
 fn draw(context: *const Context, buf: []u8) void {
     const data_u32: []u32 = std.mem.bytesAsSlice(u32, @as([]align(32) u8, @alignCast(buf)));
-    // std.debug.print("DRAWING\n", .{});
 
     const sin = std.math.sin;
     for (0..context.height) |y| {

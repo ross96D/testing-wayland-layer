@@ -3,6 +3,14 @@ const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
 const zwlr = wayland.client.zwlr;
+const gl = @import("gl");
+
+const egl = @cImport({
+    @cDefine("WL_EGL_PLATFORM", "1");
+    @cInclude("EGL/egl.h");
+    @cInclude("EGL/eglext.h");
+    @cUndef("WL_EGL_PLATFORM");
+});
 
 const Context = struct {
     shm: ?*wl.Shm,
@@ -23,6 +31,12 @@ const Context = struct {
     height: u32 = 400,
 };
 
+var table: gl.ProcTable = undefined;
+
+fn getProcAddress(name: [*:0]const u8) ?gl.PROC {
+    return egl.eglGetProcAddress(name);
+}
+
 pub fn main() !void {
     const display = try wl.Display.connect(null);
     var context = Context{
@@ -39,43 +53,13 @@ pub fn main() !void {
     registry.setListener(*Context, registryListener, &context);
     if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
-    const shm = context.shm orelse return error.NoWlShm;
+    // const shm = context.shm orelse return error.NoWlShm;
     const compositor = context.compositor orelse return error.NoWlCompositor;
     // const wm_base = context.wm_base orelse return error.NoXdgWmBase;
-
-    const buffer = blk: {
-        const width: i32 = @intCast(context.width);
-        const height: i32 = @intCast(context.height);
-        const stride = width * 4;
-        const size: u64 = @intCast(stride * height);
-
-        const fd = try std.posix.memfd_create("hello-zig-wayland", 0);
-        try std.posix.ftruncate(fd, size);
-        const data = try std.posix.mmap(
-            null,
-            size,
-            std.posix.PROT.READ | std.posix.PROT.WRITE,
-            .{ .TYPE = .SHARED },
-            fd,
-            0,
-        );
-        context.data = data;
-
-        const pool = try shm.createPool(fd, @intCast(size));
-        defer pool.destroy();
-
-        break :blk try pool.createBuffer(0, width, height, stride, wl.Shm.Format.argb8888);
-    };
-    defer buffer.destroy();
 
     const surface = try compositor.createSurface();
     defer surface.destroy();
     context.surface = surface;
-    context.buffer = buffer;
-
-    const callback = try surface.frame();
-    defer callback.destroy();
-    callback.setListener(*Context, frame_listener, &context);
 
     const layer_surface = try zwlr.LayerShellV1.getLayerSurface(context.layer_shell.?, surface, null, .overlay, "");
     layer_surface.setSize(context.width, context.height);
@@ -83,16 +67,139 @@ pub fn main() !void {
     layer_surface.setKeyboardInteractivity(.exclusive);
 
     layer_surface.setListener(*Context, layer_surface_listener, &context);
+    // const callback = try surface.frame();
+    // defer callback.destroy();
+    // callback.setListener(*Context, frame_listener, &context);
 
     surface.commit();
     if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
 
-    surface.attach(buffer, 0, 0);
+    // surface.attach(buffer, 0, 0);
     surface.commit();
 
+    // {
+    const egl_display = egl.eglGetPlatformDisplay(egl.EGL_PLATFORM_WAYLAND_KHR, display, null);
+
+    var egl_major: egl.EGLint = 0;
+    var egl_minor: egl.EGLint = 0;
+    if (egl.eglInitialize(egl_display, &egl_major, &egl_minor) == egl.EGL_TRUE) {
+        std.log.info("EGL version: {}.{}", .{ egl_major, egl_minor });
+    } else switch (egl.eglGetError()) {
+        egl.EGL_BAD_DISPLAY => return error.EglBadDisplay,
+        else => return error.EglFailedToinitialize,
+    }
+    defer _ = egl.eglTerminate(egl_display);
+
+    const egl_attributes: [12:egl.EGL_NONE]egl.EGLint = .{
+        egl.EGL_SURFACE_TYPE,    egl.EGL_WINDOW_BIT,
+        egl.EGL_RENDERABLE_TYPE, egl.EGL_OPENGL_BIT,
+        egl.EGL_RED_SIZE,        8,
+        egl.EGL_GREEN_SIZE,      8,
+        egl.EGL_BLUE_SIZE,       8,
+        egl.EGL_ALPHA_SIZE,      8,
+    };
+
+    const egl_config = config: {
+        // Rather ask for a list of possible configs, we just get the first one and
+        // hope it is a good choice.
+        var config: egl.EGLConfig = null;
+        var num_configs: egl.EGLint = 0;
+        const result = egl.eglChooseConfig(
+            egl_display,
+            &egl_attributes,
+            &config,
+            1,
+            &num_configs,
+        );
+
+        if (result != egl.EGL_TRUE) {
+            switch (egl.eglGetError()) {
+                egl.EGL_BAD_ATTRIBUTE => return error.InvalidEglConfigAttribute,
+                else => return error.EglConfigError,
+            }
+        }
+        break :config config.?;
+    };
+
+    if (egl.eglBindAPI(egl.EGL_OPENGL_API) != egl.EGL_TRUE) {
+        switch (egl.eglGetError()) {
+            egl.EGL_BAD_PARAMETER => return error.OpenGlUnsupported,
+            else => return error.InvalidApi,
+        }
+    }
+
+    const context_attributes: [4:egl.EGL_NONE]egl.EGLint = .{
+        egl.EGL_CONTEXT_MAJOR_VERSION, 4,
+        egl.EGL_CONTEXT_MINOR_VERSION, 5,
+    };
+    const egl_context = egl.eglCreateContext(
+        egl_display,
+        egl_config,
+        egl.EGL_NO_CONTEXT,
+        &context_attributes,
+    ) orelse switch (egl.eglGetError()) {
+        egl.EGL_BAD_ATTRIBUTE => return error.InvalidContextAttribute,
+        egl.EGL_BAD_CONFIG => return error.CreateContextWithBadConfig,
+        egl.EGL_BAD_MATCH => return error.UnsupportedConfig,
+        else => return error.FailedToCreateContext,
+    };
+    defer _ = egl.eglDestroyContext(egl_display, egl_context);
+
+    if (!gl.ProcTable.init(&table, getProcAddress)) {
+        @panic("fail initialization of opengl");
+    }
+    gl.makeProcTableCurrent(&table);
+
+    const egl_window = try wl.EglWindow.create(surface, @intCast(context.width), @intCast(context.height));
+    const egl_surface = egl.eglCreatePlatformWindowSurface(
+        egl_display,
+        egl_config,
+        @ptrCast(egl_window),
+        null,
+    ) orelse switch (egl.eglGetError()) {
+        egl.EGL_BAD_MATCH => return error.MismatchedConfig,
+        egl.EGL_BAD_CONFIG => return error.InvalidConfig,
+        egl.EGL_BAD_NATIVE_WINDOW => return error.InvalidWindow,
+        else => return error.FailedToCreateEglSurface,
+    };
+
+    const result = egl.eglMakeCurrent(
+        egl_display,
+        egl_surface,
+        egl_surface,
+        egl_context,
+    );
+
+    if (result == egl.EGL_FALSE) {
+        switch (egl.eglGetError()) {
+            egl.EGL_BAD_ACCESS => return error.EglThreadError,
+            egl.EGL_BAD_MATCH => return error.MismatchedContextOrSurfaces,
+            egl.EGL_BAD_NATIVE_WINDOW => return error.EglWindowInvalid,
+            egl.EGL_BAD_CONTEXT => return error.InvalidEglContext,
+            egl.EGL_BAD_ALLOC => return error.OutOfMemory,
+            else => return error.FailedToMakeCurrent,
+        }
+    }
+
+    var count: usize = 0;
+    var timer = try std.time.Timer.start();
     while (context.is_running) {
+        count += 1;
+        gl.ClearColor(1.0, 1.0, 0.5, 1.0);
+        gl.Clear(gl.COLOR_BUFFER_BIT);
+        gl.Flush();
+        if (egl.eglSwapBuffers(egl_display, egl_surface) != egl.EGL_TRUE) {
+            switch (egl.eglGetError()) {
+                egl.EGL_BAD_DISPLAY => return error.InvalidDisplay,
+                egl.EGL_BAD_SURFACE => return error.PresentInvalidSurface,
+                egl.EGL_CONTEXT_LOST => return error.EGLContextLost,
+                else => return error.FailedToSwapBuffers,
+            }
+        }
+
         if (display.dispatch() != .SUCCESS) return error.DispatchFailed;
     }
+    std.debug.print("\nTIME WAS {d}\n", .{timer.read() / (count * 1000000)});
 }
 
 fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, context: *Context) void {
@@ -185,7 +292,6 @@ pub fn frame_listener(_: *wl.Callback, event: wl.Callback.Event, context: *Conte
 const palette = [_]u32{ 0xff1a1c2c, 0xff5d275d, 0xffb13e53, 0xffef7d57, 0xffffcd75, 0xffa7f070, 0xff38b764, 0xff257179, 0xff29366f, 0xff3b5dc9, 0xff41a6f6, 0xff73eff7, 0xfff4f4f4, 0xff94b0c2, 0xff566c86, 0xff333c57 };
 fn draw(context: *const Context, buf: []u8) void {
     const data_u32: []u32 = std.mem.bytesAsSlice(u32, @as([]align(32) u8, @alignCast(buf)));
-    // std.debug.print("DRAWING\n", .{});
 
     const sin = std.math.sin;
     for (0..context.height) |y| {
